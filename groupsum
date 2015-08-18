@@ -1,0 +1,130 @@
+#!/usr/bin/python
+# Credo Survey Data Grouping Sum v1
+# Chad Miller <chad@cornsilk.net> 2015-08-18
+# should work on Python 2.6+ and Python 3
+
+
+from __future__ import print_function
+
+import sys
+reload(sys)
+sys.setdefaultencoding('UTF8')
+import os
+import zipfile
+import csv
+import io
+from pprint import pprint
+
+if sys.version_info[0] == 2:
+    input = raw_input
+
+# We probably need to map phrases to numbers and to store these somewhere. Make it.
+if not os.path.exists("response_values.py"):
+    with open("response_values.py", "w") as out:
+        out.write("value_of_response = {}")
+
+import response_values as rv
+
+def lookup(response_text, column_number=None):
+    doc = """Take an response and map it to a number. If we don't know the
+    response, ask for its value and store it for later.
+    
+    It's possible that two columns will want different values for some answer.
+    In that case, we should make each response unique. Instead of "rarely", add 
+    text that makes it unique to this question, like "rarely happy" and 
+    "rarely orange".
+    """
+    try:
+        return rv.value_of_response[response_text]
+    except KeyError:
+        while True:
+            score = input("Can't find {0!r} value. What score should it have? ".format(response_text))
+            try:
+                rv.value_of_response[response_text] = int(score.strip())
+                with open("response_values.py", "w") as out:
+                    out.write("#    "+ "\n#".join(doc.split("\n")) + "\n\n")
+                    out.write("value_of_response = ")
+                    pprint(rv.value_of_response, stream=out)
+                break
+            except ValueError:
+                print("This must be an integer, not {0!r}".format(score))
+        return rv.value_of_response[response_text]
+
+
+try:
+    this_program, in_file, group_columns_description = sys.argv
+except ValueError:
+    print("parameters are  XLSPLUSZIPFILE  GROUPRANGES")
+    print("For example,")
+    print(" {0} Responses_All_150818.pdf 10-39,44-47".format(sys.argv[0]))
+    print("But you gave,")
+    print(" {0}".format(" ".join(sys.argv)))
+    sys.exit(1)
+
+
+# Make sure the ranges make sense.
+group_columns_claimed = set()
+group_column_collision = False
+group_ranges = list()
+for i, column_range in enumerate(group_columns_description.split(",")):
+    try:
+        start, end = map(int, column_range.split("-"))
+    except ValueError as exc:
+        print("{!r} should look like '7-9', a range of two numbers".format(column_range))
+        print()
+        raise
+    for c in range(start, end+1):
+        if c in group_columns_claimed:
+            print("column {0} can not be in more than one group".format(c))
+            group_column_collision = True
+        group_columns_claimed.add(c)
+    group_ranges.append((start, end))
+
+if group_column_collision:
+    print("Quitting.")
+    sys.exit(1)
+
+# reverse order so inserting doesn't change our later indexes
+group_ranges.sort(reverse=True, key=lambda startend: startend[1])
+
+
+
+with zipfile.ZipFile(in_file, "r") as zip_container:   # open zip file
+    for zip_member_info in zip_container.infolist():   # get list of files within
+        if zip_member_info.filename.startswith("CSV/Sheet") and zip_member_info.filename.endswith(".csv"):  # make sure we're operaring on a CSV
+            out_file_name = in_file.replace(".", "") + "_grouped_" + zip_member_info.filename.replace("/", "")
+            with zip_container.open(zip_member_info.filename, "rU") as zip_member_bytes:  # read the zip file item in
+                with io.TextIOWrapper(zip_member_bytes) as zip_member:
+                    in_csv_file = csv.reader(zip_member)
+                    header_line = next(in_csv_file)
+                    for i, (start, end) in enumerate(reversed(group_ranges)):  # reverse the reversed list to get a natural order
+                        print("Column headers for group {0}".format(i+1))
+                        for c in range(start-1, end):
+                            try:
+                                print("\t", header_line[c])
+                            except IndexError:
+                                print("There is no column {0}. Aborting.".format(c-1))
+                                sys.exit(1)
+                        else:
+                            print()
+
+                    if sys.version_info[0] == 2:
+                        open_kwargs = {}
+                    else:
+                        open_kwargs = {'newline':''}
+
+                    with open("temp" + out_file_name, "w", **open_kwargs) as out_file:  # prepare to write out the result file
+                        out_csv_file = csv.writer(out_file, dialect=in_csv_file.dialect)
+                        for i, (start, end) in enumerate(group_ranges):
+                            header_line[end:end] = ["group {0} sum".format(len(group_ranges)-i)]
+                        out_csv_file.writerow(header_line)
+
+                        for row in in_csv_file:
+                            for start, end in group_ranges:
+                                sigma = 0
+                                for c in range(start-1, end):
+                                    sigma += lookup(row[c])
+                                row[end+1:end+1] = [sigma]
+                            out_csv_file.writerow(row)
+
+                    os.rename("temp" + out_file_name, out_file_name)
